@@ -1,6 +1,10 @@
 require 'net/http'
+require 'shellwords'
+require "open3"
 require 'json'
 require 'uri'
+
+require_relative 'tools'
 
 if File.exist?('.env')
     File.foreach('.env') do |line|
@@ -14,22 +18,7 @@ url = ENV['OLLAMA_URL'] || "http://127.0.0.1:11434/api/chat"
 MODEL = ENV['MODEL_NAME'] || "devstral-small-2"
 LLMURI = URI(url)
 
-msgs = [
-    { role: "system", content: "You are an agentic AI with access to tools." }
-]
-TOOLS = [
-    {
-        type: 'function',
-        function: {
-            name: 'list_files',
-            description: 'Lists all files in the current directory.',
-            parameters: {
-                type: 'object',
-                properties: {}
-            }
-        }
-    }
-]
+msgs = []
 
 puts "Chatting with #{MODEL} at #{LLMURI}. Type 'exit' to quit."
 
@@ -48,19 +37,39 @@ def send_request(msgs)
 end
 
 def execute_tool(tool_name, args)
-    args = "" if args.nil? || args == {} || args.empty?
+    args ||= {}
     puts "[System]: executing shell command '#{tool_name} #{args}'"
     result = ""
     case tool_name
     when "list_files"
-        result = %x(ls #{args})
+        path  = args["path"]  || "."
+        flags = args["flags"] || ""
+        result = %x(ls #{flags} #{path})
+    when "read_file"
+        path = args["path"]
+        return "Error: path required" unless path
+        result = %x(cat #{path})
+    when "search"
+        pattern = args["pattern"]
+        path    = args["path"]
+        flags   = args["flags"] || ""
+        return "Error: pattern and path required" unless pattern && path
+        result = %x(grep #{flags} #{pattern} #{path})
     else
         result = "Unknown tool: #{tool_name}"
     end
     return result
 end
 
+def sanitize_for_speech(text)
+  text
+    .gsub(/[`*_#<>]/, "")
+    .gsub(/\s+/, " ")
+    .strip
+end
+
 loop do
+    llmout = ""
     print "\n[User]: "
     input = gets.chomp
     break if input.downcase == "exit"
@@ -87,8 +96,12 @@ loop do
         final_msg = final_res["message"]
         msgs << final_msg
 
-        puts "[#{MODEL}]: #{final_msg["content"]}"
+        llmout = final_msg["content"]
     else
-        puts "[#{MODEL}]: #{msg["content"]}"
+        llmout = msg["content"]
     end
+    puts "[#{MODEL}]: #{llmout}"
+    speech_txt = sanitize_for_speech(llmout)
+    safe_input = Shellwords.escape(speech_txt)
+    %x(python -m piper -m en_GB-cori-high --output_raw -- #{safe_input} | ffplay -nodisp -autoexit -f s16le -ar 22050 -ch_layout mono -)
 end
